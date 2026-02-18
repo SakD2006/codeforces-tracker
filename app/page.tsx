@@ -6,8 +6,9 @@ export default function home(){
     <div className="min-h-screen bg-background dark">
       <PixelSnow
         variant="snowflake" 
-        color="#78e0f5"
+        colors={['#f5d02a', '#56d2f5', '#e846b5', '#46e85b']}
         pixelResolution={2000}
+        density={0.3}
       />
       <CodeforcesDashboard />
     </div>

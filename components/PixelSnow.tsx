@@ -30,7 +30,8 @@ uniform float uPixelResolution;
 uniform float uSpeed;
 uniform float uDepthFade;
 uniform float uFarPlane;
-uniform vec3 uColor;
+uniform vec3 uColors[4];
+uniform int uColorCount;
 uniform float uBrightness;
 uniform float uGamma;
 uniform float uDensity;
@@ -117,7 +118,8 @@ void main() {
     
     vec3 fpos = floor(pos);
     uint cellCoord = coord3(fpos);
-    float cellHash = hash3(cellCoord).x;
+    vec3 cellHash3 = hash3(cellCoord);
+    float cellHash = cellHash3.x;
 
     if (cellHash < uDensity) {
       vec3 h = hash3(cellCoord);
@@ -139,7 +141,6 @@ void main() {
         float depth = dot(flakePos - camPos, camK);
         float flakeSize = max(uFlakeSize, uMinFlakeSize * depth * halfInvResX);
         
-        // Avoid branching with step functions where possible
         float dist;
         if (uVariant < 0.5) {
           dist = max(testUV.x, testUV.y);
@@ -151,10 +152,21 @@ void main() {
         }
 
         if (dist < flakeSize) {
+          // Pick color based on a secondary hash of the cell coordinate
+          // Use cellHash3.z (third component) to select color index
+          int colorIdx = int(floor(cellHash3.z * float(uColorCount)));
+          colorIdx = clamp(colorIdx, 0, uColorCount - 1);
+
+          vec3 flakeColor;
+          if (colorIdx == 0)      flakeColor = uColors[0];
+          else if (colorIdx == 1) flakeColor = uColors[1];
+          else if (colorIdx == 2) flakeColor = uColors[2];
+          else                    flakeColor = uColors[3];
+
           float flakeSizeRatio = uFlakeSize / flakeSize;
           float intensity = exp2(-(t + toIntersection) * invDepthFade) *
                            min(1.0, flakeSizeRatio * flakeSizeRatio) * uBrightness;
-          gl_FragColor = vec4(uColor * pow(vec3(intensity), vec3(uGamma)), 1.0);
+          gl_FragColor = vec4(flakeColor * pow(vec3(intensity), vec3(uGamma)), 1.0);
           return;
         }
       }
@@ -172,7 +184,13 @@ void main() {
 `;
 
 interface PixelSnowProps {
+  /** Single color (used when `colors` is not provided). */
   color?: string;
+  /**
+   * Array of 2–4 colors. Each flake is randomly assigned one of these colors.
+   * When provided, takes precedence over `color`.
+   */
+  colors?: string[];
   flakeSize?: number;
   minFlakeSize?: number;
   pixelResolution?: number;
@@ -188,8 +206,15 @@ interface PixelSnowProps {
   style?: React.CSSProperties;
 }
 
+/** Convert a CSS color string to a Three.js Vector3 (r, g, b in [0,1]). */
+function toVec3(hex: string): Vector3 {
+  const c = new Color(hex);
+  return new Vector3(c.r, c.g, c.b);
+}
+
 export default function PixelSnow({
   color = '#ffffff',
+  colors,
   flakeSize = 0.01,
   minFlakeSize = 1.25,
   pixelResolution = 200,
@@ -211,28 +236,30 @@ export default function PixelSnow({
   const materialRef = useRef<ShaderMaterial | null>(null);
   const resizeTimeoutRef = useRef<number | null>(null);
 
-  // Memoize shader variant value
+  // Resolve color palette — always 4 slots; pad with first color if fewer provided
+  const colorPalette = useMemo(() => {
+    const base = colors && colors.length > 0 ? colors.slice(0, 4) : [color];
+    while (base.length < 4) base.push(base[0]);
+    return base;
+  }, [color, colors]);
+
+  const colorVectors = useMemo(() => colorPalette.map(toVec3), [colorPalette]);
+  const colorCount = useMemo(
+    () => (colors && colors.length > 0 ? Math.min(colors.length, 4) : 1),
+    [colors]
+  );
+
   const variantValue = useMemo(() => {
     return variant === 'round' ? 1.0 : variant === 'snowflake' ? 2.0 : 0.0;
   }, [variant]);
 
-  // Memoize color conversion
-  const colorVector = useMemo(() => {
-    const threeColor = new Color(color);
-    return new Vector3(threeColor.r, threeColor.g, threeColor.b);
-  }, [color]);
-
-  // Debounced resize handler
   const handleResize = useCallback(() => {
-    if (resizeTimeoutRef.current) {
-      clearTimeout(resizeTimeoutRef.current);
-    }
+    if (resizeTimeoutRef.current) clearTimeout(resizeTimeoutRef.current);
     resizeTimeoutRef.current = window.setTimeout(() => {
       const container = containerRef.current;
       const renderer = rendererRef.current;
       const material = materialRef.current;
       if (!container || !renderer || !material) return;
-
       const w = container.offsetWidth;
       const h = container.offsetHeight;
       renderer.setSize(w, h);
@@ -240,23 +267,18 @@ export default function PixelSnow({
     }, 100);
   }, []);
 
-  // Visibility observer
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
-
     const observer = new IntersectionObserver(
-      ([entry]) => {
-        isVisibleRef.current = entry.isIntersecting;
-      },
+      ([entry]) => { isVisibleRef.current = entry.isIntersecting; },
       { threshold: 0 }
     );
-
     observer.observe(container);
     return () => observer.disconnect();
   }, []);
 
-  // Main Three.js setup - only runs once
+  // Main Three.js setup — only runs once
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -290,7 +312,8 @@ export default function PixelSnow({
         uSpeed: { value: speed },
         uDepthFade: { value: depthFade },
         uFarPlane: { value: farPlane },
-        uColor: { value: colorVector.clone() },
+        uColors: { value: colorVectors.map(v => v.clone()) },
+        uColorCount: { value: colorCount },
         uBrightness: { value: brightness },
         uGamma: { value: gamma },
         uDensity: { value: density },
@@ -309,8 +332,6 @@ export default function PixelSnow({
     const startTime = performance.now();
     const animate = () => {
       animationRef.current = requestAnimationFrame(animate);
-
-      // Only render if visible
       if (isVisibleRef.current) {
         material.uniforms.uTime.value = (performance.now() - startTime) * 0.001;
         renderer.render(scene, camera);
@@ -321,12 +342,8 @@ export default function PixelSnow({
     return () => {
       cancelAnimationFrame(animationRef.current);
       window.removeEventListener('resize', handleResize);
-      if (resizeTimeoutRef.current) {
-        clearTimeout(resizeTimeoutRef.current);
-      }
-      if (container.contains(renderer.domElement)) {
-        container.removeChild(renderer.domElement);
-      }
+      if (resizeTimeoutRef.current) clearTimeout(resizeTimeoutRef.current);
+      if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement);
       renderer.dispose();
       geometry.dispose();
       material.dispose();
@@ -334,9 +351,9 @@ export default function PixelSnow({
       materialRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handleResize]); // Only recreate scene when handleResize changes
+  }, [handleResize]);
 
-  // Update material uniforms when props change
+  // Update uniforms whenever props change
   useEffect(() => {
     const material = materialRef.current;
     if (!material) return;
@@ -352,7 +369,11 @@ export default function PixelSnow({
     material.uniforms.uDensity.value = density;
     material.uniforms.uVariant.value = variantValue;
     material.uniforms.uDirection.value = (direction * Math.PI) / 180;
-    material.uniforms.uColor.value.copy(colorVector);
+    // Update color array uniforms
+    colorVectors.forEach((vec, i) => {
+      material.uniforms.uColors.value[i].copy(vec);
+    });
+    material.uniforms.uColorCount.value = colorCount;
   }, [
     flakeSize,
     minFlakeSize,
@@ -365,7 +386,8 @@ export default function PixelSnow({
     density,
     variantValue,
     direction,
-    colorVector
+    colorVectors,
+    colorCount
   ]);
 
   return (
